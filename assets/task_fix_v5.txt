@@ -1,0 +1,65 @@
+# v5 修复任务：基本面消息卡片的条件渲染太严
+
+## 背景
+上一轮（v4）你（AI）只改了 `/api/market/quotes/route.ts` 修复了 JSONP 解析，走势和顶部净值预计已修好。但**基本面消息卡片仍不会显示**，用户在详情页看不到「基本面消息」这个卡片，走势下面直接跳到"提醒规则"。
+
+你在 v4 回复里承认：`page.tsx` 第 346-348 行的挂载代码是这样的：
+```jsx
+{item.type === 'fund' && (
+  <FundamentalsNews fundCode={item.code} fundName={item.name} />
+)}
+```
+
+## 根本问题
+
+用户 watchlist 里的 5 只标的都是基金/ETF（华夏沪深300增强C、国联安半导体ETF联接C、招商中证白酒C、华夏软件龙头C、华安黄金ETF联接C），但是：
+1. 你不知道 watchlist 表里 `type` 字段的**实际取值**是什么——可能是 `null`、`''`、`'etf'`、`'index_fund'`，也可能只有一部分记录是 `'fund'`
+2. `item.type === 'fund'` 是**极其严苛的相等判断**，只要 type 不是精确的字符串 `'fund'`，卡片就永远不显示
+
+## 你要做的（一次做完，别再糊弄）
+
+### 步骤 1：查一次 Supabase watchlist 实际 type 值
+用 Supabase 客户端执行等价的 SQL：
+```sql
+select id, code, name, type from watchlist limit 20;
+```
+在 AI 回复里贴出返回结果（type 字段的真实取值），让我们看到 type 字段到底是什么。
+
+### 步骤 2：放宽条件渲染
+按以下优先级选一个方案，改 `src/app/detail/[id]/page.tsx` 第 346-348 行：
+
+**方案 A（推荐，最宽容）**：完全去掉 type 条件，任何 watchlist item 都显示基本面消息卡片
+```jsx
+<FundamentalsNews fundCode={item.code} fundName={item.name} />
+```
+
+**方案 B（次选，兼容多种基金类型）**：把等号改为白名单
+```jsx
+{['fund', 'etf', 'index_fund', 'lof', null, undefined, ''].includes(item.type as any) && (
+  <FundamentalsNews fundCode={item.code} fundName={item.name} />
+)}
+```
+
+**方案 C（保底）**：把 `item.type === 'fund'` 改成 `item.type !== 'stock'`（假设未来有股票类型）
+
+任选一个，只要保证用户当前 5 只基金都能显示卡片就行。**推荐方案 A**，因为基本面消息对基金/ETF/股票都有价值，没必要屏蔽。
+
+### 步骤 3：顺便检查以下潜在 bug（不深挖，但要扫一眼）
+
+1. `FundamentalsNews` 组件本身：如果 `fundCode` 或 `fundName` 是 `null`/`undefined`/`''`，组件是不是也会静默不渲染？如果是，加个占位显示"数据加载中"或"暂无消息数据"，不要整个卡片消失
+2. 十大重仓股接口 `/holdings/{code}` 在 xalpha-service 上，如果调用失败，公司 Tab 应显示"暂无重仓股数据"占位，不要让整个卡片消失
+3. 走势卡片：v4 修好了 quotes API，但走势卡片的数据请求路径是不是也需要一起改？如果走势卡片调的是 `/api/market/history` 而不是 `/api/market/quotes`，那 v4 修改可能没覆盖到走势，请再确认一下走势 API 路由
+
+### 步骤 4：交付前必须给出
+1. **watchlist 表 type 字段的真实取值示例**（用户 5 只标的的 type 分别是什么）
+2. **改动后 page.tsx 第 346-348 行左右的完整 snippet**
+3. **`FundamentalsNews` 组件的 loading/error/empty state 是否有 fallback UI 的 snippet**
+4. **走势卡片实际调用的 API 路径**（是 `/api/market/quotes` 还是 `/api/market/history`，v4 修的是 quotes，走势 API 有没有同样的 JSONP 问题需要修）
+
+## 全局约束
+- ❌ 不许说"已修复"但没生效
+- ❌ 不许再判"无需修复"——这次 Q1 的"用户操作错误"（type 值不匹配）显然应该在代码里兜住
+- ❌ 不许改 xalpha-service
+- ✅ 修完明确回答：是否需要重新 deploy、是否需要环境变量、是否需要 SQL
+
+修完请一次性回复：type 实际值 + 3 处 snippet + 手动验收步骤。
